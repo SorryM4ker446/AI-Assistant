@@ -2,7 +2,7 @@
 
 Tech stack:
 - Next.js App Router + TypeScript
-- Vercel AI SDK
+- Vercel AI SDK + OpenRouter
 - PostgreSQL + Prisma
 - Tailwind CSS + shadcn/ui
 
