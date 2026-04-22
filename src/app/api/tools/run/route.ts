@@ -3,7 +3,9 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { resolveModelId } from "@/config/model";
 import { getChatModel } from "@/lib/ai/client";
+import { truncateTitle } from "@/lib/ai/ui-message";
 import { getOrCreateRequestUser } from "@/lib/auth/request-user";
+import { saveMemory } from "@/lib/memory/store";
 import { createTask, createTaskInputSchema } from "@/tools/definitions/create-task";
 import { searchKnowledge, searchKnowledgeInputSchema } from "@/tools/definitions/search-knowledge";
 
@@ -79,6 +81,77 @@ function buildCreateTaskAssistantText(result: Awaited<ReturnType<typeof createTa
   return `已创建任务「${result.title}」${due}，当前状态为 ${result.status}。`;
 }
 
+function stringifyForMemory(value: unknown, maxLength = 1600): string {
+  let text = "";
+
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "empty";
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
+function extractMemorySeed(tool: "searchKnowledge" | "createTask", input: unknown): string {
+  if (tool === "searchKnowledge" && input && typeof input === "object") {
+    const query = (input as { query?: unknown }).query;
+    if (typeof query === "string" && query.trim()) return query.trim();
+  }
+
+  if (tool === "createTask" && input && typeof input === "object") {
+    const title = (input as { title?: unknown }).title;
+    if (typeof title === "string" && title.trim()) return title.trim();
+  }
+
+  return tool;
+}
+
+async function persistManualToolMemory(params: {
+  userId: string;
+  tool: "searchKnowledge" | "createTask";
+  input: unknown;
+  output: unknown;
+  assistantText: string;
+}) {
+  const timestamp = new Date().toISOString();
+  const seed = truncateTitle(extractMemorySeed(params.tool, params.input), 40);
+  const normalizedSeed = seed || params.tool;
+
+  const inputMemory = [
+    `time=${timestamp}`,
+    "type=manual-tool-input",
+    `tool=${params.tool}`,
+    `payload=${stringifyForMemory(params.input)}`,
+  ].join("\n");
+
+  const outputMemory = [
+    `time=${timestamp}`,
+    "type=manual-tool-output",
+    `tool=${params.tool}`,
+    `assistant=${stringifyForMemory(params.assistantText, 800)}`,
+    `payload=${stringifyForMemory(params.output)}`,
+  ].join("\n");
+
+  await Promise.allSettled([
+    saveMemory({
+      userId: params.userId,
+      key: truncateTitle(`tool:${params.tool}:input:${normalizedSeed}`, 60),
+      value: inputMemory,
+      score: 0.45,
+    }),
+    saveMemory({
+      userId: params.userId,
+      key: truncateTitle(`tool:${params.tool}:output:${normalizedSeed}`, 60),
+      value: outputMemory,
+      score: 0.5,
+    }),
+  ]);
+}
+
 export async function POST(req: NextRequest) {
   try {
     const user = await getOrCreateRequestUser(req);
@@ -100,6 +173,17 @@ export async function POST(req: NextRequest) {
         result: data,
         modelId: parsed.data.modelId,
       });
+      try {
+        await persistManualToolMemory({
+          userId: user.id,
+          tool: "searchKnowledge",
+          input: parsed.data.input,
+          output: data,
+          assistantText,
+        });
+      } catch (memoryError) {
+        console.warn("tools.run memory.persist warning", memoryError);
+      }
       return Response.json({
         tool: parsed.data.tool,
         data,
@@ -108,10 +192,22 @@ export async function POST(req: NextRequest) {
     }
 
     const data = await createTask(user.id, parsed.data.input);
+    const assistantText = buildCreateTaskAssistantText(data);
+    try {
+      await persistManualToolMemory({
+        userId: user.id,
+        tool: "createTask",
+        input: parsed.data.input,
+        output: data,
+        assistantText,
+      });
+    } catch (memoryError) {
+      console.warn("tools.run memory.persist warning", memoryError);
+    }
     return Response.json({
       tool: parsed.data.tool,
       data,
-      assistantText: buildCreateTaskAssistantText(data),
+      assistantText,
     });
   } catch (error) {
     console.error("/api/tools/run POST error", error);
