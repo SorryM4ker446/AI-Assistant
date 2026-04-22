@@ -315,6 +315,14 @@ export default function ChatPage() {
 
       const payload = (await response.json()) as { data: ChatSummary };
       const chat = payload.data;
+      const seededPreferences: ChatScopedPreferences = {
+        ...getDefaultChatPreferences(),
+        modelMode: "chat",
+        selectedChatModel,
+      };
+
+      window.localStorage.setItem(getChatPrefsStorageKey(chat.id), JSON.stringify(seededPreferences));
+      applyChatPreferences(seededPreferences);
 
       setActiveChatId(chat.id);
       setMessages([]);
