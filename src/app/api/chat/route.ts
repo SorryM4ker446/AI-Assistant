@@ -472,8 +472,6 @@ export async function POST(req: NextRequest) {
     return result.toUIMessageStreamResponse({
       originalMessages: messages,
       onFinish: async ({ responseMessage, isAborted }) => {
-        if (isAborted) return;
-
         try {
           const assistantText = getTextFromUIMessage(responseMessage).trim();
           const toolItems = getToolItemsFromResponseMessage(responseMessage);
@@ -492,7 +490,7 @@ export async function POST(req: NextRequest) {
             chatId: chat.id,
             role: "assistant",
             content,
-            status: "success",
+            status: isAborted ? "error" : "success",
             clientMessageId: responseMessage.id,
           });
 

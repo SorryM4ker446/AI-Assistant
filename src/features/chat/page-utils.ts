@@ -223,7 +223,11 @@ export function mapStoredMessagesToUI(messages: StoredMessage[]): {
   const imageMap: Record<string, string> = {};
   const videoMap: Record<string, string> = {};
   const uiMessages = messages.map((message) => {
-    const uiMessageId = message.clientMessageId ?? message.id;
+    const normalizedClientMessageId =
+      typeof message.clientMessageId === "string" && message.clientMessageId.trim().length > 0
+        ? message.clientMessageId.trim()
+        : null;
+    const uiMessageId = normalizedClientMessageId ?? message.id;
     const parsedImage = decodeImageMessage(message.content);
     const parsedVideo = decodeVideoMessage(message.content);
     const parsedAssistantToolMessage = decodePersistedAssistantToolMessage(message.content);

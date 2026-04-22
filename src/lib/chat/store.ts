@@ -94,10 +94,11 @@ export async function saveChatMessage(params: {
   clientMessageId?: string;
 }) {
   const { chatId, role, content, status = "success", clientMessageId } = params;
+  const normalizedClientMessageId = clientMessageId?.trim() ? clientMessageId.trim() : undefined;
 
-  if (clientMessageId) {
+  if (normalizedClientMessageId) {
     const existing = await db.message.findFirst({
-      where: { chatId, clientMessageId },
+      where: { chatId, clientMessageId: normalizedClientMessageId },
     });
 
     if (existing) return existing;
@@ -109,7 +110,7 @@ export async function saveChatMessage(params: {
       role,
       content,
       status,
-      clientMessageId,
+      ...(normalizedClientMessageId ? { clientMessageId: normalizedClientMessageId } : {}),
     },
   });
 

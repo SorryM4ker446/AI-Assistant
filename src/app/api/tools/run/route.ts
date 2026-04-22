@@ -3,24 +3,38 @@ import { NextRequest } from "next/server";
 import { z } from "zod";
 import { resolveModelId } from "@/config/model";
 import { getChatModel } from "@/lib/ai/client";
+import { truncateTitle } from "@/lib/ai/ui-message";
 import { getOrCreateRequestUser } from "@/lib/auth/request-user";
+import { saveMemory } from "@/lib/memory/store";
 import { createTask, createTaskInputSchema } from "@/tools/definitions/create-task";
 import { searchKnowledge, searchKnowledgeInputSchema } from "@/tools/definitions/search-knowledge";
+import { runWebSearch, webSearchInput } from "@/tools/definitions/web-search";
 
-const runToolSchema = z.discriminatedUnion("tool", [
-  z.object({
-    tool: z.literal("searchKnowledge"),
-    input: searchKnowledgeInputSchema,
-    modelId: z.string().optional(),
-    mode: z.literal("chat"),
-  }),
-  z.object({
-    tool: z.literal("createTask"),
-    input: createTaskInputSchema,
-    modelId: z.string().optional(),
-    mode: z.literal("chat"),
-  }),
-]);
+type ToolExecutionContext<Input> = {
+  userId: string;
+  input: Input;
+  modelId?: string;
+};
+
+type ToolAssistantTextContext<Input, Output> = {
+  input: Input;
+  output: Output;
+  modelId?: string;
+};
+
+type ManualToolDescriptor<Input = unknown, Output = unknown> = {
+  inputSchema: z.ZodType<Input>;
+  execute: (context: ToolExecutionContext<Input>) => Promise<Output>;
+  buildAssistantText?: (context: ToolAssistantTextContext<Input, Output>) => Promise<string> | string;
+  deriveMemorySeed?: (input: Input) => string;
+};
+
+const runToolSchema = z.object({
+  tool: z.string().min(1),
+  input: z.unknown(),
+  modelId: z.string().optional(),
+  mode: z.literal("chat"),
+});
 
 function buildSearchFallbackText(result: Awaited<ReturnType<typeof searchKnowledge>>): string {
   if (result.total === 0 || result.results.length === 0) {
@@ -79,6 +93,136 @@ function buildCreateTaskAssistantText(result: Awaited<ReturnType<typeof createTa
   return `已创建任务「${result.title}」${due}，当前状态为 ${result.status}。`;
 }
 
+function buildWebSearchAssistantText(result: Awaited<ReturnType<typeof runWebSearch>>): string {
+  const count = Array.isArray(result.results) ? result.results.length : 0;
+  if (count === 0) {
+    return `已执行 Web Search，但暂未返回可用结果：${result.query}`;
+  }
+  return `已完成 Web Search，返回 ${count} 条结果。`;
+}
+
+function stringifyForMemory(value: unknown, maxLength = 1600): string {
+  let text = "";
+
+  try {
+    text = typeof value === "string" ? value : JSON.stringify(value);
+  } catch {
+    text = String(value);
+  }
+
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (!normalized) return "empty";
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
+function inferMemorySeed(input: unknown, fallback: string): string {
+  if (typeof input === "string" && input.trim()) return input.trim();
+  if (input && typeof input === "object") {
+    const candidateKeys = [
+      "query",
+      "title",
+      "task",
+      "prompt",
+      "keyword",
+      "keywords",
+      "topic",
+      "name",
+      "content",
+      "text",
+      "url",
+    ];
+
+    for (const key of candidateKeys) {
+      const value = (input as Record<string, unknown>)[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+    }
+  }
+
+  return fallback;
+}
+
+function buildGenericAssistantText(tool: string, output: unknown): string {
+  if (output && typeof output === "object") {
+    const maybeMessage = (output as { message?: unknown }).message;
+    if (typeof maybeMessage === "string" && maybeMessage.trim()) {
+      return maybeMessage.trim();
+    }
+  }
+  return `已完成工具「${tool}」调用。`;
+}
+
+async function persistManualToolMemory(params: {
+  userId: string;
+  tool: string;
+  input: unknown;
+  output: unknown;
+  assistantText: string;
+  memorySeed?: string;
+}) {
+  const timestamp = new Date().toISOString();
+  const seed = truncateTitle(
+    inferMemorySeed(params.memorySeed ?? params.input, params.tool),
+    40,
+  );
+  const normalizedSeed = seed || params.tool;
+
+  const inputMemory = [
+    `time=${timestamp}`,
+    "type=manual-tool-input",
+    `tool=${params.tool}`,
+    `payload=${stringifyForMemory(params.input)}`,
+  ].join("\n");
+
+  const outputMemory = [
+    `time=${timestamp}`,
+    "type=manual-tool-output",
+    `tool=${params.tool}`,
+    `assistant=${stringifyForMemory(params.assistantText, 800)}`,
+    `payload=${stringifyForMemory(params.output)}`,
+  ].join("\n");
+
+  await Promise.allSettled([
+    saveMemory({
+      userId: params.userId,
+      key: truncateTitle(`tool:${params.tool}:input:${normalizedSeed}`, 60),
+      value: inputMemory,
+      score: 0.45,
+    }),
+    saveMemory({
+      userId: params.userId,
+      key: truncateTitle(`tool:${params.tool}:output:${normalizedSeed}`, 60),
+      value: outputMemory,
+      score: 0.5,
+    }),
+  ]);
+}
+
+const MANUAL_TOOL_CATALOG: Record<string, ManualToolDescriptor<any, any>> = {
+  searchKnowledge: {
+    inputSchema: searchKnowledgeInputSchema,
+    execute: async ({ userId, input }: ToolExecutionContext<z.infer<typeof searchKnowledgeInputSchema>>) =>
+      searchKnowledge(userId, input),
+    buildAssistantText: async ({ output, modelId }) => buildSearchAssistantText({ result: output, modelId }),
+    deriveMemorySeed: (input: z.infer<typeof searchKnowledgeInputSchema>) => input.query,
+  },
+  createTask: {
+    inputSchema: createTaskInputSchema,
+    execute: async ({ userId, input }: ToolExecutionContext<z.infer<typeof createTaskInputSchema>>) =>
+      createTask(userId, input),
+    buildAssistantText: ({ output }) => buildCreateTaskAssistantText(output),
+    deriveMemorySeed: (input: z.infer<typeof createTaskInputSchema>) => input.title,
+  },
+  webSearch: {
+    inputSchema: webSearchInput,
+    execute: async ({ input }: ToolExecutionContext<z.infer<typeof webSearchInput>>) => runWebSearch(input),
+    buildAssistantText: ({ output }) => buildWebSearchAssistantText(output),
+    deriveMemorySeed: (input: z.infer<typeof webSearchInput>) => input.query,
+  },
+};
+
 export async function POST(req: NextRequest) {
   try {
     const user = await getOrCreateRequestUser(req);
@@ -94,24 +238,60 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (parsed.data.tool === "searchKnowledge") {
-      const data = await searchKnowledge(user.id, parsed.data.input);
-      const assistantText = await buildSearchAssistantText({
-        result: data,
-        modelId: parsed.data.modelId,
-      });
-      return Response.json({
-        tool: parsed.data.tool,
-        data,
-        assistantText,
-      });
+    const tool = parsed.data.tool.trim();
+    const descriptor = MANUAL_TOOL_CATALOG[tool as keyof typeof MANUAL_TOOL_CATALOG];
+    if (!descriptor) {
+      return Response.json(
+        {
+          error: `Unsupported tool: ${tool}`,
+          supportedTools: Object.keys(MANUAL_TOOL_CATALOG),
+        },
+        { status: 400 },
+      );
     }
 
-    const data = await createTask(user.id, parsed.data.input);
+    const parsedInput = descriptor.inputSchema.safeParse(parsed.data.input);
+    if (!parsedInput.success) {
+      return Response.json(
+        {
+          error: "Invalid tool input",
+          details: parsedInput.error.flatten(),
+        },
+        { status: 400 },
+      );
+    }
+
+    const data = await descriptor.execute({
+      userId: user.id,
+      input: parsedInput.data,
+      modelId: parsed.data.modelId,
+    });
+
+    const assistantText = descriptor.buildAssistantText
+      ? await descriptor.buildAssistantText({
+          input: parsedInput.data,
+          output: data,
+          modelId: parsed.data.modelId,
+        })
+      : buildGenericAssistantText(tool, data);
+
+    try {
+      await persistManualToolMemory({
+        userId: user.id,
+        tool,
+        input: parsedInput.data,
+        output: data,
+        assistantText,
+        memorySeed: descriptor.deriveMemorySeed?.(parsedInput.data),
+      });
+    } catch (memoryError) {
+      console.warn("tools.run memory.persist warning", memoryError);
+    }
+
     return Response.json({
-      tool: parsed.data.tool,
+      tool,
       data,
-      assistantText: buildCreateTaskAssistantText(data),
+      assistantText,
     });
   } catch (error) {
     console.error("/api/tools/run POST error", error);
