@@ -1,12 +1,12 @@
 # TOOLS_READINESS
 
-更新时间：2026-04-22
+更新时间：2026-04-25
 
 ## 1. 当前结论（综合）
 
-- `searchKnowledge`：7/10（可用，短板在知识源管理与检索质量保障）
-- `createTask`：5/10（可创建，缺任务管理闭环）
-- `webSearch`：1/10（仅占位定义，未接入执行链路）
+- `searchKnowledge`：8/10（可用，已具备独立知识库管理入口；短板在检索质量评测与文档索引）
+- `createTask`：8/10（已具备创建、查询、状态流转、删除和右侧栏管理闭环；提醒/到期处理仍属 P1）
+- `webSearch`：8/10（已接入 Tavily、自动/手动调用、LLM 综合推理和可折叠来源；缓存/重试仍属 P1）
 
 ## 2. 综合可用度清单
 
@@ -17,59 +17,69 @@
 | searchKnowledge | 自动触发语义门控（收紧） | 已有 | 明确动作意图 + 高置信度才触发 | P0 |
 | searchKnowledge | 数据源（`memories + builtin`） | 已有 | 结果可区分 `source` 与 `score` | P0 |
 | searchKnowledge | 结果可解释性（UI） | 已有 | 来源标签 + 工具详情可展开 | P0 |
-| searchKnowledge | 知识库管理入口（新增/查看/删除） | 缺失 | 有独立 UI 或 API 管理知识条目 | P0 |
+| searchKnowledge | 知识库管理入口（新增/查看/删除） | 已完成 | 独立 `/knowledge` 页面 + `GET/POST/DELETE /api/knowledge` | P0 |
 | searchKnowledge | 检索质量保障（评测/排序优化） | 缺失 | 有最小评测集、优化策略与回归基线 | P1 |
 | searchKnowledge | 项目文档接入（非仅 memory） | 部分 | 支持文档索引、更新与检索 | P1 |
 | createTask | 工具已注册并写入 `tasks` 表 | 已有 | 任务创建后数据库可查 | P0 |
 | createTask | 手动/自动触发 | 已有 | 聊天模式下两种触发都可用 | P0 |
-| createTask | 任务查询 API（list/detail） | 缺失 | 按用户可获取任务列表与详情 | P0 |
-| createTask | 任务操作 API（update/delete/status） | 缺失 | 支持 `todo/in_progress/done` + 删除 | P0 |
-| createTask | 任务管理 UI（列表/筛选/状态流转） | 缺失 | 前端可完整管理任务 | P0 |
+| createTask | 任务查询 API（list/detail） | 已完成 | `GET /api/tasks` + `GET /api/tasks/[id]`，按用户隔离 | P0 |
+| createTask | 任务操作 API（update/delete/status） | 已完成 | `PATCH/DELETE /api/tasks/[id]`，支持 `todo/in_progress/done` + 删除 | P0 |
+| createTask | 任务管理 UI（列表/筛选/状态流转） | 已完成 | 聊天页右侧任务栏，支持筛选、状态流转、删除、展开/收起 | P0 |
 | createTask | 时间与重复校验（dueDate/防重） | 部分 | 时区正确、同内容防重复 | P1 |
 | createTask | 任务闭环（提醒/到期处理） | 缺失 | 到期提醒或计划任务机制 | P1 |
-| webSearch | 工具定义与输入 schema | 已有（占位） | 有稳定输入/输出协议 | P0 |
-| webSearch | 实际联网检索执行 | 缺失 | 返回真实 `title/url/snippet` 结果 | P0 |
-| webSearch | 注册到工具总线（registry/chat） | 缺失 | 可被自动与手动流程调用 | P0 |
-| webSearch | 手动调用入口（`/api/tools/run`） | 缺失 | 与其他工具一致可手动触发 | P0 |
-| webSearch | 自动语义触发策略 | 缺失 | 明确“需外部信息”时才触发 | P1 |
-| webSearch | 引用可追溯（URL/来源） | 缺失 | 回答中可展示引用来源 | P0 |
-| webSearch | 限流/超时/重试/缓存 | 缺失 | 失败可恢复、成本可控 | P1 |
+| webSearch | 工具定义与输入 schema | 已完成 | `{ query, maxResults }` + 标准化 `title/url/snippet/score/source` 输出 | P0 |
+| webSearch | 实际联网检索执行 | 已完成 | Tavily provider，返回真实 `title/url/snippet` 结果 | P0 |
+| webSearch | 注册到工具总线（registry/chat） | 已完成 | 可被自动与手动流程调用 | P0 |
+| webSearch | 手动调用入口（`/api/tools/run`） | 已完成 | 与其他工具一致可手动触发，且会经过 LLM 综合推理 | P0 |
+| webSearch | 自动语义触发策略 | 已完成（基础版） | 明确“需外部/最新/联网信息”时触发，仍可在 P1 优化误触发率 | P1 |
+| webSearch | 引用可追溯（URL/来源） | 已完成 | 回答下方提供可展开/收起的搜索来源列表 | P0 |
+| webSearch | 限流/超时/重试/缓存 | 部分 | 已有超时与错误码；重试、缓存仍缺失 | P1 |
 | 通用 | 工具仅聊天模式可用 | 已有 | 非聊天模式不可手动/被动调用工具 | P0 |
 | 通用 | 历史工具详情可回看 | 已有 | 历史消息支持折叠查看 input/output | P0 |
-| 通用 | 端到端测试（工具触发→DB→UI） | 缺失 | 至少 2 条 E2E 用例长期可回归 | P0 |
-| 通用 | 监控与审计日志（tool call） | 部分 | 可追踪触发、输入、输出、错误、耗时 | P1 |
+| 通用 | 端到端测试（工具触发→DB→UI） | 已完成 | 3 条 Playwright E2E：`webSearch/createTask/searchKnowledge` | P0 |
+| 通用 | 监控与审计日志（tool call） | 已完成（基础版） | 记录 `toolId/trigger/state/durationMs/userId/errorCode/requestId` | P1 |
 
 ## 3. P0 排期建议（先可用）
 
 ### 第 1 周（2026-04-23 ~ 2026-04-29）
 
-- `webSearch` 接入真实检索 provider（含返回结构标准化）
-- `webSearch` 注册到工具总线（自动 + 手动）
-- `webSearch` 回答引用显示（URL/source）
-- `createTask`：新增 list/detail API
+- [x] `webSearch` 接入真实检索 provider（Tavily，含返回结构标准化）
+- [x] `webSearch` 注册到工具总线（自动 + 手动）
+- [x] `webSearch` 回答引用显示（URL/source，可展开/收起）
+- [x] `webSearch` 手动调用支持搜索结果 + LLM 综合推理
+- [x] `createTask`：新增 list/detail API
 
 **验收：**
-- 聊天模式下可手动/自动调用 `webSearch` 并返回可点击来源
-- `createTask` 创建后可通过 API 查询到同一用户任务列表
+- [x] 聊天模式下可手动/自动调用 `webSearch` 并返回可点击来源
+- [x] `createTask` 创建后可通过 API 查询到同一用户任务列表
 
 ### 第 2 周（2026-04-30 ~ 2026-05-06）
 
-- `createTask`：新增 update/delete/status API
-- 前端任务管理 UI（列表、筛选、状态流转、删除）
-- `searchKnowledge`：知识条目管理 API（新增/查看/删除）
+- [x] `createTask`：新增 update/delete/status API
+- [x] 前端任务管理 UI（右侧栏列表、筛选、状态流转、删除、最多显示 3 个 + 展开）
+- [x] `searchKnowledge`：知识条目管理 API（新增/查看/删除）
+- [x] 独立知识库页面 `/knowledge`
 
 **验收：**
-- 任务可从 `todo` 流转到 `done`，并可删除
-- 知识条目可通过 API 管理并被 `searchKnowledge` 检索到
+- [x] 任务可从 `todo` 流转到 `done`，并可删除
+- [x] 知识条目可通过 API 管理并被 `searchKnowledge` 检索到
 
 ### 第 3 周（2026-05-07 ~ 2026-05-13）
 
-- 端到端测试补齐（`searchKnowledge/createTask/webSearch`）
-- 通用错误码与日志结构统一
+- [x] 端到端测试补齐（`searchKnowledge/createTask/webSearch`）
+- [x] 通用错误码与日志结构统一
 
 **验收：**
-- 至少 2 条稳定 E2E（工具触发→落库→UI可见）
-- 关键失败场景有明确错误提示（限流、超时、权限、上游失败）
+- [x] 至少 2 条稳定 E2E（当前 3 条）
+- [x] 关键失败场景有明确错误提示（限流、超时、权限、上游失败）
+
+### P0 完成记录（2026-04-25）
+
+- 已完成 Tavily Web Search、工具总线注册、自动/手动触发、LLM 综合推理、可折叠搜索来源。
+- 已完成任务 API 与右侧任务管理栏，状态更新使用乐观更新以减少闪烁。
+- 已完成独立知识库管理页 `/knowledge`，聊天页左上角提供入口。
+- 已完成统一 API 错误结构与基础工具执行日志。
+- 已完成 Playwright E2E：`webSearch` 来源展示、`createTask` 状态流转、`searchKnowledge` 检索知识条目。
 
 ## 4. P1 排期建议（提质量）
 

@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint . --ext .js,.jsx,.ts,.tsx",
+    "test:e2e": "playwright test",
     "db:generate": "prisma generate --schema src/db/schema.prisma",
     "db:migrate": "prisma migrate dev --schema src/db/schema.prisma",
     "db:studio": "prisma studio --schema src/db/schema.prisma"
@@ -32,6 +33,7 @@
     "zod": "latest"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "@types/node": "latest",
     "@types/react": "latest",
     "@types/react-dom": "latest",

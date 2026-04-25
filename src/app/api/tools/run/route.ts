@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
+import { ApiError, createApiErrorResponse } from "@/lib/server/api-error";
 import { getOrCreateRequestUser } from "@/lib/auth/request-user";
+import { logToolExecution } from "@/lib/server/tool-log";
 import { getToolDescriptor, isToolSupportedInMode, type ToolMode } from "@/tools/catalog";
 import { persistToolMemory } from "@/tools/memory-policy";
 
@@ -14,60 +16,55 @@ const runToolSchema = z.object({
 });
 
 export async function POST(req: NextRequest) {
+  const startedAt = Date.now();
+  let logContext: { toolId: string; userId: string; requestId?: string } | null = null;
+  let succeeded = false;
+
   try {
     const user = await getOrCreateRequestUser(req);
     const parsed = runToolSchema.safeParse(await req.json());
 
     if (!parsed.success) {
-      return Response.json(
-        {
-          error: "Invalid tool request",
-          details: parsed.error.flatten(),
-        },
-        { status: 400 },
-      );
+      throw new ApiError({
+        code: "VALIDATION_ERROR",
+        message: "Invalid tool request",
+        details: parsed.error.flatten(),
+      });
     }
 
     const toolId = parsed.data.tool.trim();
     const mode = parsed.data.mode as ToolMode;
+    logContext = { toolId, userId: user.id };
 
     const descriptor = getToolDescriptor(toolId);
     if (!descriptor) {
-      return Response.json(
-        {
-          error: `Unsupported tool: ${toolId}`,
-        },
-        { status: 400 },
-      );
+      throw new ApiError({
+        code: "VALIDATION_ERROR",
+        message: `Unsupported tool: ${toolId}`,
+      });
     }
 
     if (!isToolSupportedInMode(toolId, mode)) {
-      return Response.json(
-        {
-          error: `Tool ${toolId} is not supported in mode: ${mode}`,
-        },
-        { status: 400 },
-      );
+      throw new ApiError({
+        code: "VALIDATION_ERROR",
+        message: `Tool ${toolId} is not supported in mode: ${mode}`,
+      });
     }
 
     if (!descriptor.manual.enabled) {
-      return Response.json(
-        {
-          error: `Tool ${toolId} is not available for manual invocation`,
-        },
-        { status: 400 },
-      );
+      throw new ApiError({
+        code: "VALIDATION_ERROR",
+        message: `Tool ${toolId} is not available for manual invocation`,
+      });
     }
 
     const parsedInput = descriptor.inputSchema.safeParse(parsed.data.input);
     if (!parsedInput.success) {
-      return Response.json(
-        {
-          error: "Invalid tool input",
-          details: parsedInput.error.flatten(),
-        },
-        { status: 400 },
-      );
+      throw new ApiError({
+        code: "VALIDATION_ERROR",
+        message: "Invalid tool input",
+        details: parsedInput.error.flatten(),
+      });
     }
 
     const data = await descriptor.execute({
@@ -76,6 +73,11 @@ export async function POST(req: NextRequest) {
       modelId: parsed.data.modelId,
       trigger: "manual",
     });
+    const requestId =
+      data && typeof data === "object" && "requestId" in data && typeof data.requestId === "string"
+        ? data.requestId
+        : undefined;
+    logContext = { toolId, userId: user.id, requestId };
 
     const assistantText = (
       await descriptor.buildAssistantText({
@@ -110,6 +112,7 @@ export async function POST(req: NextRequest) {
       console.warn("tools.run memory.persist warning", memoryError);
     }
 
+    succeeded = true;
     return Response.json({
       tool: toolId,
       data,
@@ -117,6 +120,28 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.error("/api/tools/run POST error", error);
-    return Response.json({ error: "Failed to run tool" }, { status: 500 });
+    if (succeeded && logContext) {
+      logToolExecution({
+        toolId: logContext.toolId,
+        trigger: "manual",
+        state: "output-error",
+        durationMs: Date.now() - startedAt,
+        userId: logContext.userId,
+        requestId: logContext.requestId,
+        errorCode: error instanceof ApiError ? error.code : "INTERNAL_ERROR",
+      });
+    }
+    return createApiErrorResponse(error, "Failed to run tool");
+  } finally {
+    if (logContext) {
+      logToolExecution({
+        toolId: logContext.toolId,
+        trigger: "manual",
+        state: "output-available",
+        durationMs: Date.now() - startedAt,
+        userId: logContext.userId,
+        requestId: logContext.requestId,
+      });
+    }
   }
 }

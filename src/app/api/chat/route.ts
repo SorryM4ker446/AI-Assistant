@@ -1,4 +1,4 @@
-import { convertToModelMessages, generateObject, stepCountIs, streamText, type UIMessage } from "ai";
+import { convertToModelMessages, generateText, Output, stepCountIs, streamText, type UIMessage } from "ai";
 import { NextRequest } from "next/server";
 import { z } from "zod";
 import { chatModelSupportsImageInput, resolveModelId } from "@/config/model";
@@ -16,6 +16,7 @@ import {
 } from "@/lib/ai/ui-message";
 import { createChat, getChat, getRecentChatMessages, saveChatMessage } from "@/lib/chat/store";
 import { getRelevantMemories, saveMemory } from "@/lib/memory/store";
+import { ApiError, createApiErrorResponse } from "@/lib/server/api-error";
 import { checkRateLimit } from "@/lib/server/rate-limit";
 import { setupServerProxy } from "@/lib/server/proxy";
 import { db } from "@/db";
@@ -188,14 +189,17 @@ async function detectAutoToolIntent(params: {
     .join("\n");
 
   try {
-    const { object } = await generateObject({
+    const { output } = await generateText({
       model: getChatModel(params.modelId),
-      schema: autoToolIntentSchema,
+      output: Output.object({
+        schema: autoToolIntentSchema,
+      }),
       system: [
         "You are a tool-intent classifier for a chat assistant.",
         "Decide intent from ONLY the latest user message.",
         `Allowed tool intents: ${Array.from(allowedIds).join(", ")}, none.`,
         "Choose none unless user intent is explicit-action and shouldUseToolNow=true.",
+        "Only choose webSearch when the latest message explicitly asks for web search, current/latest information, external facts, or URLs/sources outside this app.",
         "Do not trigger tools for ordinary topic follow-up questions that can be answered directly.",
         "For implicit, broad, or ambiguous asks, set shouldUseToolNow=false and prefer none.",
         "Use high confidence only when the action request is unambiguous.",
@@ -211,33 +215,33 @@ async function detectAutoToolIntent(params: {
 
     if (TOOL_DEBUG) {
       console.info("auto-tool intent result", {
-        intent: object.intent,
-        shouldUseToolNow: object.shouldUseToolNow,
-        userRequestMode: object.userRequestMode,
-        confidence: object.confidence ?? null,
-        expectedBenefit: object.expectedBenefit ?? null,
+        intent: output.intent,
+        shouldUseToolNow: output.shouldUseToolNow,
+        userRequestMode: output.userRequestMode,
+        confidence: output.confidence ?? null,
+        expectedBenefit: output.expectedBenefit ?? null,
         candidates: Array.from(allowedIds),
       });
     }
 
-    const intent = object.intent.trim();
+    const intent = output.intent.trim();
     if (intent === "none" || !allowedIds.has(intent)) {
       return null;
     }
 
-    if (!object.shouldUseToolNow) {
+    if (!output.shouldUseToolNow) {
       return null;
     }
 
-    if (object.userRequestMode !== "explicit-action") {
+    if (output.userRequestMode !== "explicit-action") {
       return null;
     }
 
-    if (typeof object.confidence === "number" && object.confidence < 0.82) {
+    if (typeof output.confidence === "number" && output.confidence < 0.82) {
       return null;
     }
 
-    if (typeof object.expectedBenefit === "number" && object.expectedBenefit < 0.7) {
+    if (typeof output.expectedBenefit === "number" && output.expectedBenefit < 0.7) {
       return null;
     }
 
@@ -270,12 +274,15 @@ function stripFilePartsForTextOnlyModel(messages: UIMessage[]): UIMessage[] {
 }
 
 function buildModelInputMessages(messages: UIMessage[], toolsEnabled: boolean): UIMessage[] {
+  const userMessages = messages.filter((message) => message.role === "user");
+
   if (toolsEnabled) {
-    return messages;
+    const latestUser = userMessages[userMessages.length - 1];
+    return latestUser ? [latestUser] : [];
   }
 
   // In non-tool turns, keep user messages as the primary signal to avoid assistant-style carry-over.
-  return messages.filter((message) => message.role === "user");
+  return userMessages;
 }
 
 async function getOrCreateChat(params: {
@@ -319,13 +326,10 @@ export async function POST(req: NextRequest) {
     setupServerProxy();
 
     if (!process.env.OPENROUTER_API_KEY?.trim()) {
-      return Response.json(
-        {
-          error:
-            "OPENROUTER_API_KEY is not configured. Set it in .env and restart the dev server before chatting.",
-        },
-        { status: 500 },
-      );
+      throw new ApiError({
+        code: "CONFIGURATION_ERROR",
+        message: "OPENROUTER_API_KEY is not configured. Set it in .env and restart the dev server before chatting.",
+      });
     }
 
     const body = (await req.json()) as ChatRequestBody;
@@ -334,14 +338,17 @@ export async function POST(req: NextRequest) {
     const latestUserMessage = getLatestUserMessage(messages);
 
     if (messages.length === 0) {
-      return Response.json({ error: "messages is required" }, { status: 400 });
+      throw new ApiError({
+        code: "VALIDATION_ERROR",
+        message: "messages is required",
+      });
     }
 
     if (latestUserMessage?.files.length && !chatModelSupportsImageInput(modelId)) {
-      return Response.json(
-        { error: `当前聊天模型 ${modelId} 不支持图片输入，请切换到支持视觉的模型。` },
-        { status: 400 },
-      );
+      throw new ApiError({
+        code: "VALIDATION_ERROR",
+        message: `当前聊天模型 ${modelId} 不支持图片输入，请切换到支持视觉的模型。`,
+      });
     }
 
     const user = await getOrCreateRequestUser(req);
@@ -354,8 +361,13 @@ export async function POST(req: NextRequest) {
     if (!rateLimit.allowed) {
       return Response.json(
         {
-          error: "Too many chat requests. Please wait a moment and try again.",
-          retryAfterSeconds: rateLimit.retryAfterSeconds,
+          error: {
+            code: "RATE_LIMITED",
+            message: "Too many chat requests. Please wait a moment and try again.",
+            details: {
+              retryAfterSeconds: rateLimit.retryAfterSeconds,
+            },
+          },
         },
         {
           status: 429,
@@ -562,6 +574,6 @@ export async function POST(req: NextRequest) {
     });
   } catch (error) {
     console.error("/api/chat error", error);
-    return Response.json({ error: "Failed to generate chat response" }, { status: 500 });
+    return createApiErrorResponse(error, "Failed to generate chat response");
   }
 }
