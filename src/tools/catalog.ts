@@ -1,7 +1,9 @@
 import { generateText, type ToolSet } from "ai";
 import { z } from "zod";
+import { ApiError } from "@/lib/server/api-error";
 import { resolveModelId } from "@/config/model";
 import { getChatModel } from "@/lib/ai/client";
+import { logToolExecution } from "@/lib/server/tool-log";
 import { createTask, createTaskInputSchema } from "@/tools/definitions/create-task";
 import { searchKnowledge, searchKnowledgeInputSchema } from "@/tools/definitions/search-knowledge";
 import { runWebSearch, webSearchInput } from "@/tools/definitions/web-search";
@@ -159,12 +161,64 @@ function buildCreateTaskAssistantText(result: Awaited<ReturnType<typeof createTa
   return `已创建任务「${result.title}」${due}，当前状态为 ${result.status}。`;
 }
 
-function buildWebSearchAssistantText(result: Awaited<ReturnType<typeof runWebSearch>>): string {
+function buildWebSearchFallbackText(result: Awaited<ReturnType<typeof runWebSearch>>): string {
   const count = Array.isArray(result.results) ? result.results.length : 0;
   if (count === 0) {
     return `已执行 Web Search，但暂未返回可用结果：${result.query}`;
   }
-  return `已完成 Web Search，返回 ${count} 条结果。`;
+  const references = result.results
+    .slice(0, 5)
+    .map((item, index) => `${index + 1}. [${item.title}](${item.url})${item.snippet ? `：${item.snippet}` : ""}`)
+    .join("\n");
+
+  return [`已完成 Web Search，返回 ${count} 条结果。`, "", "可在下方展开查看搜索来源。", references].join("\n");
+}
+
+async function buildWebSearchAssistantText(params: {
+  result: Awaited<ReturnType<typeof runWebSearch>>;
+  modelId?: string;
+}): Promise<string> {
+  const { result, modelId } = params;
+  const count = Array.isArray(result.results) ? result.results.length : 0;
+  if (count === 0) {
+    return buildWebSearchFallbackText(result);
+  }
+
+  const references = result.results.slice(0, 5).map((item, index) => ({
+    index: index + 1,
+    title: item.title,
+    url: item.url,
+    snippet: item.snippet,
+    score: item.score,
+    source: item.source,
+  }));
+
+  try {
+    const answer = await generateText({
+      model: getChatModel(resolveModelId(modelId)),
+      system:
+        "你是一个严谨的中文研究助手。你会基于 Web Search 结果回答用户问题，先综合判断，再给出清晰结论。必须区分搜索事实和你的推理，不能编造来源没有的信息。",
+      prompt: [
+        `用户问题：${result.query}`,
+        "",
+        "Web Search 结果（按相关性排序）：",
+        JSON.stringify(references, null, 2),
+        "",
+        "请用中文输出：",
+        "1. 直接结论或建议；",
+        "2. 搜索结果中的关键依据，引用格式使用 [1]、[2]；",
+        "3. 你的综合推理与不确定性；",
+        "4. 不要在正文末尾单独列出来源清单，来源会由界面根据工具结果单独折叠展示。",
+      ].join("\n"),
+    });
+
+    const text = answer.text.trim();
+    if (text) return text;
+  } catch (error) {
+    console.warn("webSearch synthesis failed", error);
+  }
+
+  return buildWebSearchFallbackText(result);
 }
 
 const TOOL_CATALOG: Record<string, AnyToolDescriptor> = {
@@ -307,15 +361,29 @@ const TOOL_CATALOG: Record<string, AnyToolDescriptor> = {
       submitLabel: "执行工具",
       primaryFieldKey: "query",
       primaryFieldLabel: "搜索词",
-      fields: [],
+      fields: [
+        {
+          key: "maxResults",
+          label: "结果数",
+          type: "number",
+          min: 1,
+          max: 10,
+          step: 1,
+          defaultValue: "5",
+        },
+      ],
     },
     auto: {
-      enabled: false,
-      intentHint: "一期自动语义触发暂不启用 webSearch。",
+      enabled: true,
+      intentHint: "当用户明确要求联网、搜索、查询最新信息或外部事实时使用。",
     },
     inputSchema: webSearchInput,
     execute: async ({ input }) => runWebSearch(input),
-    buildAssistantText: ({ output }) => buildWebSearchAssistantText(output),
+    buildAssistantText: ({ output, modelId }) =>
+      buildWebSearchAssistantText({
+        result: output,
+        modelId,
+      }),
     memory: {
       enabled: true,
       minQuality: 0.4,
@@ -383,12 +451,41 @@ export function createChatToolSet(userId: string, options?: { toolIds?: string[]
     {
       description: tool.description,
       inputSchema: tool.inputSchema,
-      execute: async (input: unknown) =>
-        tool.execute({
-          userId,
-          input,
-          trigger: "auto",
-        }),
+      execute: async (input: unknown) => {
+        const startedAt = Date.now();
+        try {
+          const output = await tool.execute({
+            userId,
+            input,
+            trigger: "auto",
+          });
+          const requestId =
+            output && typeof output === "object" && "requestId" in output && typeof output.requestId === "string"
+              ? output.requestId
+              : undefined;
+
+          logToolExecution({
+            toolId: tool.id,
+            trigger: "auto",
+            state: "output-available",
+            durationMs: Date.now() - startedAt,
+            userId,
+            requestId,
+          });
+
+          return output;
+        } catch (error) {
+          logToolExecution({
+            toolId: tool.id,
+            trigger: "auto",
+            state: "output-error",
+            durationMs: Date.now() - startedAt,
+            userId,
+            errorCode: error instanceof ApiError ? error.code : "INTERNAL_ERROR",
+          });
+          throw error;
+        }
+      },
     },
   ]);
 
